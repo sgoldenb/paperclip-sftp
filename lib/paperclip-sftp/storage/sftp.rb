@@ -22,13 +22,14 @@ module Paperclip
 
       # Make SFTP connection, but use current one if exists.
       #
-      def sftp
-        @sftp ||= Net::SFTP.start(
+      def sftp(&block)
+        Net::SFTP.start(
           @sftp_options[:host],
           @sftp_options[:user],
           password: @sftp_options[:password],
           port: @sftp_options[:port],
-          keys: @sftp_options[:keys]
+          keys: @sftp_options[:keys], 
+	  &block
         )
       end
 
@@ -45,18 +46,23 @@ module Paperclip
 
       def copy_to_local_file(style, local_dest_path)
         log("copying #{path(style)} to local file #{local_dest_path}")
-        sftp.download!(path(style), local_dest_path)
+
+        sftp do |s|
+          s.download!(path(style), local_dest_path)
+        end
       rescue Net::SFTP::StatusException => e
         warn("#{e} - cannot copy #{path(style)} to local file #{local_dest_path}")
         false
       end
 
       def flush_writes #:nodoc:
-        @queued_for_write.each do |style, file|
-          mkdir_p(File.dirname(path(style)))
-          log("uploading #{file.path} to #{path(style)}")
-          sftp.upload!(file.path, path(style))
-          sftp.setstat!(path(style), :permissions => 0644)
+	sftp do |s|
+          @queued_for_write.each do |style, file|
+            mkdir_p(File.dirname(path(style)), s)
+            log("uploading #{file.path} to #{path(style)}")
+            s.upload!(file.path, path(style))
+            s.setstat!(path(style), :permissions => 0644)
+          end
         end
 
         after_flush_writes # allows attachment to clean up temp files
@@ -64,25 +70,26 @@ module Paperclip
       end
 
       def flush_deletes #:nodoc:
-        @queued_for_delete.each do |path|
-          begin
-            log("deleting file #{path}")
-            sftp.remove(path).wait
-          rescue Net::SFTP::StatusException => e
-            # ignore file-not-found, let everything else pass
-          end
-
-          begin
-            path = File.dirname(path)
-            while sftp.dir.entries(path).delete_if { |e| e.name =~ /^\./ }.empty?
-              sftp.rmdir(path).wait
-              path = File.dirname(path)
+	sftp do |s|
+          @queued_for_delete.each do |path|
+            begin
+              log("deleting file #{path}")
+              s.remove(path).wait
+            rescue Net::SFTP::StatusException => e
+              # ignore file-not-found, let everything else pass
             end
-          rescue Net::SFTP::StatusException => e
-            # stop trying to remove parent directories
+
+            begin
+            path = File.dirname(path)
+              while sftp.dir.entries(path).delete_if { |e| e.name =~ /^\./ }.empty?
+                s.rmdir(path).wait
+                path = File.dirname(path)
+              end
+            rescue Net::SFTP::StatusException => e
+              # stop trying to remove parent directories
+            end
           end
         end
-
         @queued_for_delete = []
       end
 
@@ -90,7 +97,7 @@ module Paperclip
 
       # Create directory structure.
       #
-      def mkdir_p(remote_directory)
+      def mkdir_p(remote_directory, sftp)
         log("mkdir_p for #{remote_directory}")
         root_directory = '/'
         remote_directory.split('/').each do |directory|
